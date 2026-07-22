@@ -10,11 +10,9 @@ st.write("Upload a data table screenshot to extract details, modify fields live,
 
 # --- Sidebar API Key Configuration ---
 st.sidebar.subheader("🔑 API Configuration")
-# Initialize session state for api_key if not present
 if 'user_api_key' not in st.session_state:
     st.session_state.user_api_key = ""
 
-# API key input field in the sidebar (masked for privacy)
 api_key_input = st.sidebar.text_input(
     "Gemini API Key", 
     value=st.session_state.user_api_key, 
@@ -50,9 +48,76 @@ if 'booking_owner' not in st.session_state:
 if 'formatted_address' not in st.session_state:
     st.session_state.formatted_address = "235 Joseph Street, CANADIAN VIC 3350"
 
-# --- Custom Component Builders for Templates, Cards, and Messages ---
+# JavaScript component listener to bring changed input box text back into Streamlit seamlessly
+query_params = st.query_params
+for key in ['full_name', 'formatted_address', 'first_name', 'last_name', 'contact_number', 'partner_name', 'booking_owner']:
+    if f"sync_{key}" in query_params:
+        st.session_state[key] = query_params[f"sync_{key}"]
 
-# Multi-line Textarea Box with Embedded Copy Icon (Perfect for Templates, Cards, and Messages)
+# --- Custom Component Builders ---
+
+# Single-line Input Field with Embedded Copy Icon (Matches the requested clean layout)
+def create_embedded_copy_input(label, current_value, state_key):
+    safe_val = current_value.replace('"', '&quot;')
+    html_code = f"""
+    <div style="font-family: sans-serif; margin-bottom: 18px; position: relative; width: 100%;">
+        <label style="display: block; font-size: 14px; color: #E6E6E6; font-weight: 500; margin-bottom: 6px;">{label}</label>
+        <div style="position: relative; display: flex; align-items: center; width: 100%;">
+            <input type="text" id="input_{state_key}" value="{safe_val}" oninput="syncToStreamlit()" style="
+                width: 100%;
+                background-color: #262730;
+                color: #FFFFFF;
+                border: 1px solid #4A4B57;
+                padding: 10px 42px 10px 14px;
+                border-radius: 6px;
+                font-size: 15px;
+                outline: none;
+                box-sizing: border-box;
+            " />
+            <button id="icon_{state_key}" onclick="copyText()" title="Copy to clipboard" style="
+                position: absolute;
+                right: 4px;
+                background: transparent;
+                border: none;
+                color: #808495;
+                cursor: pointer;
+                padding: 8px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                border-radius: 4px;
+                outline: none;
+            ">
+                <svg id="svg_copy_{state_key}" xmlns="http://www.w3.org/2000/svg" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                <svg id="svg_check_{state_key}" xmlns="http://www.w3.org/2000/svg" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#24A0ED" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display: none;"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            </button>
+        </div>
+    </div>
+    <script>
+    function copyText() {{
+        const inputEl = document.getElementById("input_{state_key}");
+        navigator.clipboard.writeText(inputEl.value).then(() => {{
+            const copyIcon = document.getElementById("svg_copy_{state_key}");
+            const checkIcon = document.getElementById("svg_check_{state_key}");
+            copyIcon.style.display = "none";
+            checkIcon.style.display = "inline-block";
+            setTimeout(() => {{
+                checkIcon.style.display = "none";
+                copyIcon.style.display = "inline-block";
+            }}, 1500);
+        }}).catch(err => {{ alert("Failed to copy text: " + err); }});
+    }}
+    function syncToStreamlit() {{
+        const val = document.getElementById("input_{state_key}").value;
+        const url = new URL(window.parent.location.href);
+        url.searchParams.set("sync_{state_key}", val);
+        window.parent.history.replaceState({{}}, "", url.toString());
+    }}
+    </script>
+    """
+    st.components.v1.html(html_code, height=78)
+
+# Multi-line Textarea Box with Embedded Copy Icon
 def create_embedded_copy_textarea(label, current_value, unique_id, height=130):
     safe_val = current_value.replace('"', '&quot;')
     html_code = f"""
@@ -232,27 +297,17 @@ with col1:
     
     st.write("---")
     
-    # Fully Editable Core Information Blocks with Individual Copy Buttons
+    # Fully Editable Core Information Blocks with Embedded Copy Icons
     st.subheader("📌 Extracted Core Information (Editable)")
-    st.write("Edit fields to update templates; click the icon to copy individual values:")
-
-    def create_editable_row(label, state_key):
-        c_a, c_b = st.columns([0.88, 0.12])
-        with c_a:
-            st.session_state[state_key] = st.text_input(label, value=st.session_state[state_key], key=f"input_{state_key}")
-        with c_b:
-            st.write("###") # vertical alignment spacing
-            if st.button("📋", key=f"btn_{state_key}", help=f"Copy {label}"):
-                st.write(f'<script>navigator.clipboard.writeText("{st.session_state[state_key]}")</script>', unsafe_allow_html=True)
-                st.toast(f"Copied {label}!")
-
-    create_editable_row("Full Name", "full_name")
-    create_editable_row("Address", "formatted_address")
-    create_editable_row("First Name", "first_name")
-    create_editable_row("Last Name", "last_name")
-    create_editable_row("Recipient Mobile Number", "contact_number")
-    create_editable_row("Partner's Name", "partner_name")
-    create_editable_row("Booking Owner", "booking_owner")
+    st.write("Correct fields live inside the boxes. Click the embedded icon on the right edge to copy:")
+    
+    create_embedded_copy_input("Full Name", st.session_state.full_name, "full_name")
+    create_embedded_copy_input("Address", st.session_state.formatted_address, "formatted_address")
+    create_embedded_copy_input("First Name", st.session_state.first_name, "first_name")
+    create_embedded_copy_input("Last Name", st.session_state.last_name, "last_name")
+    create_embedded_copy_input("Recipient Mobile Number", st.session_state.contact_number, "contact_number")
+    create_embedded_copy_input("Partner's Name", st.session_state.partner_name, "partner_name")
+    create_embedded_copy_input("Booking Owner", st.session_state.booking_owner, "booking_owner")
 
 # --- Dynamic Greeting Setup ---
 if st.session_state.partner_name.strip():
