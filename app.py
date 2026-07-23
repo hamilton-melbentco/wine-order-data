@@ -1,12 +1,14 @@
 import streamlit as st
+import streamlit.components.v1 as components
 from PIL import Image
 from google import genai
-import re
+import io
+import base64
 
 # 1. Page Configuration & UI Initialization
 st.set_page_config(page_title="🥂 Wine Order Extractor", layout="wide")
 st.title("🍾 Wine Order Image Data Extractor")
-st.write("Upload a data table screenshot to extract details, modify fields live, and generate ready-to-copy templates.")
+st.write("Upload or paste a data table screenshot to extract details, modify fields live, and generate ready-to-copy templates.")
 
 # --- Sidebar API Key Configuration ---
 st.sidebar.subheader("🔑 API Configuration")
@@ -48,7 +50,7 @@ if 'booking_owner' not in st.session_state:
 if 'formatted_address' not in st.session_state:
     st.session_state.formatted_address = "235 Joseph Street, CANADIAN VIC 3350"
 
-# JavaScript component listener to bring changed input box text back into Streamlit seamlessly
+# JavaScript component listener to sync text input states
 query_params = st.query_params
 for key in ['full_name', 'formatted_address', 'first_name', 'last_name', 'contact_number', 'partner_name', 'booking_owner']:
     if f"sync_{key}" in query_params:
@@ -56,7 +58,6 @@ for key in ['full_name', 'formatted_address', 'first_name', 'last_name', 'contac
 
 # --- Custom Component Builders ---
 
-# Single-line Input Field with Embedded Copy Icon (Matches the requested clean layout)
 def create_embedded_copy_input(label, current_value, state_key):
     safe_val = current_value.replace('"', '&quot;')
     html_code = f"""
@@ -115,9 +116,8 @@ def create_embedded_copy_input(label, current_value, state_key):
     }}
     </script>
     """
-    st.components.v1.html(html_code, height=78)
+    components.html(html_code, height=78)
 
-# Multi-line Textarea Box with Embedded Copy Icon
 def create_embedded_copy_textarea(label, current_value, unique_id, height=130):
     safe_val = current_value.replace('"', '&quot;')
     html_code = f"""
@@ -175,9 +175,8 @@ def create_embedded_copy_textarea(label, current_value, unique_id, height=130):
     }}
     </script>
     """
-    st.components.v1.html(html_code, height=height + (30 if label else 10))
+    components.html(html_code, height=height + (30 if label else 10))
 
-# Procurement Link Button Helper
 def create_dan_murphys_link_button(label, url):
     html_code = f"""
     <a href="{url}" target="_blank" style="text-decoration: none;">
@@ -201,18 +200,90 @@ def create_dan_murphys_link_button(label, url):
         </button>
     </a>
     """
-    st.components.v1.html(html_code, height=55)
+    components.html(html_code, height=55)
 
-# 3. Sidebar File Uploader Component
+# --- Sidebar Input Section (Upload or Click-to-Paste Button) ---
 st.sidebar.write("---")
-uploaded_file = st.sidebar.file_uploader("Upload Image", type=["png", "jpg", "jpeg", "webp"])
+st.sidebar.subheader("📥 Input Screenshot")
 
-# If a file is uploaded, handle processing logic and rendering
-if uploaded_file is not None:
+# Option 1: File Uploader
+uploaded_file = st.sidebar.file_uploader("Upload Image File", type=["png", "jpg", "jpeg", "webp"])
+
+# Option 2: Direct "Paste Snip from Clipboard" Button
+st.sidebar.markdown("<p style='font-size:14px; color:#E6E6E6; font-weight:500; margin-bottom:4px;'>Or Paste Directly from Clipboard</p>", unsafe_allow_html=True)
+
+paste_button_code = """
+<button onclick="pasteFromClipboard()" style="
+    width: 100%;
+    background-color: #FF4B4B;
+    color: white;
+    border: none;
+    padding: 10px 15px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-weight: bold;
+    font-size: 14px;
+    font-family: sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    box-shadow: 0px 2px 4px rgba(0,0,0,0.2);
+">
+    📋 Paste Snip from Clipboard
+</button>
+<script>
+async function pasteFromClipboard() {
+    try {
+        const clipboardItems = await navigator.clipboard.read();
+        for (const clipboardItem of clipboardItems) {
+            for (const type of clipboardItem.types) {
+                if (type.startsWith('image/')) {
+                    const blob = await clipboardItem.getType(type);
+                    const reader = new FileReader();
+                    reader.onload = function(event) {
+                        const base64Data = event.target.result;
+                        const url = new URL(window.parent.location.href);
+                        url.searchParams.set('pasted_image', base64Data);
+                        window.parent.history.replaceState({}, '', url.toString());
+                        window.parent.location.reload();
+                    };
+                    reader.readAsDataURL(blob);
+                    return;
+                }
+            }
+        }
+        alert("No image found on your clipboard! Take a screenshot with Snipping Tool first.");
+    } catch (err) {
+        alert("Clipboard read failed or permission denied. Make sure to click 'Allow' when the browser asks for clipboard access!");
+    }
+}
+</script>
+"""
+# Render component cleanly inside the sidebar container context
+with st.sidebar:
+    components.html(paste_button_code, height=55)
+
+# Check if an image was pasted via URL query params or uploaded via file uploader
+image = None
+file_id = ""
+
+if "pasted_image" in query_params:
+    try:
+        header, encoded = query_params["pasted_image"].split(",", 1)
+        image_bytes = base64.b64decode(encoded)
+        image = Image.open(io.BytesIO(image_bytes))
+        st.sidebar.image(image, caption="Pasted Snip from Clipboard", use_container_width=True)
+        file_id = "pasted_screenshot_" + str(len(image_bytes))
+    except Exception as e:
+        st.sidebar.error("Failed to load clipboard image.")
+elif uploaded_file is not None:
     image = Image.open(uploaded_file)
     st.sidebar.image(image, caption="Uploaded Screenshot", use_container_width=True)
-    
     file_id = uploaded_file.name + str(uploaded_file.size)
+
+# If an image is present, handle processing logic
+if image is not None:
     if 'last_processed_file' not in st.session_state or st.session_state.last_processed_file != file_id:
         if not client:
             st.error("Please enter your Gemini API Key in the sidebar first to process images.")
@@ -273,7 +344,7 @@ if uploaded_file is not None:
                 except Exception as e:
                     st.error(f"Processing failed: {e}")
 else:
-    st.info("👈 Enter your API Key and upload your table screenshot in the left sidebar to generate templates automatically.")
+    st.info("👈 Enter your API Key and click **'Paste Snip from Clipboard'** or upload an image in the left sidebar to generate templates automatically.")
 
 
 # --- Render layout globally ---
