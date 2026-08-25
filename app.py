@@ -402,7 +402,7 @@ with col1:
     st.subheader("🛒 Quick Procurement")
     st.write("Select a wine type below to instantly open its official Dan Murphy's order page:")
 
-    wine_tab1, wine_tab2, wine_tab3, wine_tab4 = st.tabs(["Red Wine", "White Wine", "Sparkling Wine", "Moscato"])
+    wine_tab1, wine_tab2, wine_tab3, wine_tab4, wine_tab5 = st.tabs(["Red Wine", "White Wine", "Sparkling Wine", "Moscato", "Rose Wine"])
 
     with wine_tab1:
         create_dan_murphys_link_button("🍷 Order Red Wine (Little Yering Pinot Noir)", "https://www.danmurphys.com.au/product/DM_727725/yering-station-little-yering-pinot-noir")
@@ -413,7 +413,7 @@ with col1:
     with wine_tab4:
         create_dan_murphys_link_button("🍇 Order Moscato (Brown Brothers Moscato)", "https://www.danmurphys.com.au/product/DM_93537/brown-brothers-moscato")
     with wine_tab5:
-        create_dan_murphys_link_button("🌹 Order Rose (La Planchelière Cabernet d'Anjou Rosé)", "https://www.danmurphys.com.au/product/DM_93537/brown-brothers-moscato")
+        create_dan_murphys_link_button("🌹 Order Rose (La Planchelière Cabernet d'Anjou Rosé)", "https://www.danmurphys.com.au/product/DM_907928")
 
     st.write("---")
 
