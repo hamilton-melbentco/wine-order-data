@@ -412,6 +412,8 @@ with col1:
         create_dan_murphys_link_button("🍾 Order Sparkling Wine (Dal Zotto Prosecco)", "https://www.danmurphys.com.au/product/DM_377397/dal-zotto-pucino-prosecco")
     with wine_tab4:
         create_dan_murphys_link_button("🍇 Order Moscato (Brown Brothers Moscato)", "https://www.danmurphys.com.au/product/DM_93537/brown-brothers-moscato")
+    with wine_tab5:
+        create_dan_murphys_link_button("🌹 Order Rose (La Planchelière Cabernet d'Anjou Rosé)", "https://www.danmurphys.com.au/product/DM_93537/brown-brothers-moscato")
 
     st.write("---")
 
