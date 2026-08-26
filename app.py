@@ -2,8 +2,10 @@ import streamlit as st
 import streamlit.components.v1 as components
 from PIL import Image
 from google import genai
+from groq import Groq
 from streamlit_paste_button import paste_image_button as pbutton
 import io
+import base64
 import hashlib
 
 # 1. Page Configuration & UI Initialization
@@ -11,48 +13,48 @@ st.set_page_config(page_title="🥂 Wine Order Extractor", layout="wide")
 st.title("🍾 Wine Order Image Data Extractor")
 st.write("Upload or paste one or more data table screenshots to extract details, modify fields live, and generate ready-to-copy templates.")
 
-# --- Sidebar API Key Configuration ---
-st.sidebar.subheader("🔑 API Configuration")
-if 'user_api_key' not in st.session_state:
-    st.session_state.user_api_key = ""
+# ---------------------------------------------------------------------------
+# Session state defaults
+# ---------------------------------------------------------------------------
+# Everything an order screenshot fills in / that "Refresh" should clear.
+ORDER_FIELD_DEFAULTS = {
+    'full_name': "",
+    'first_name': "",
+    'last_name': "",
+    'partner_name': "",
+    'contact_number': "",
+    'booking_owner': "",
+    'formatted_address': "",
+    'missing_fields': [],
+    'pasted_batch': [],          # list of {"image": PIL.Image, "hash": str}
+    'last_paste_hash': None,
+    'staged_images': [],         # combined pasted + uploaded images, set by the input fragment
+    'staged_file_id': "",
+    'last_processed_file': None,
+}
 
-api_key_input = st.sidebar.text_input(
-    "Gemini API Key",
-    value=st.session_state.user_api_key,
-    type="password",
-    placeholder="Paste your key here...",
-    help="Enter your Gemini API key to enable image data extraction."
-)
+# Configuration state that should SURVIVE a "new delivery" refresh.
+CONFIG_FIELD_DEFAULTS = {
+    'gemini_api_key': "",
+    'groq_api_key': "",
+    'primary_provider': "Gemini",
+    'groq_model': "qwen/qwen3.6-27b",
+    'uploader_key_version': 0,   # bumped on refresh to force the file_uploader to reset
+}
 
-if api_key_input:
-    st.session_state.user_api_key = api_key_input
+for _defaults in (ORDER_FIELD_DEFAULTS, CONFIG_FIELD_DEFAULTS):
+    for k, v in _defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v.copy() if isinstance(v, list) else v
 
-# 2. Initialize Gemini Client using the sidebar input or environment fallback
-client = None
-if st.session_state.user_api_key.strip():
-    try:
-        client = genai.Client(api_key=st.session_state.user_api_key.strip())
-    except Exception as e:
-        st.sidebar.error(f"Invalid API Key initialization: {e}")
 
-# Initialize default session state variables if they don't exist yet
-# (left blank on purpose — the sample names/numbers now show only as grayed-out hint text)
-if 'full_name' not in st.session_state:
-    st.session_state.full_name = ""
-if 'first_name' not in st.session_state:
-    st.session_state.first_name = ""
-if 'last_name' not in st.session_state:
-    st.session_state.last_name = ""
-if 'partner_name' not in st.session_state:
-    st.session_state.partner_name = ""
-if 'contact_number' not in st.session_state:
-    st.session_state.contact_number = ""
-if 'booking_owner' not in st.session_state:
-    st.session_state.booking_owner = ""
-if 'formatted_address' not in st.session_state:
-    st.session_state.formatted_address = ""
-if 'missing_fields' not in st.session_state:
-    st.session_state.missing_fields = []
+def reset_order():
+    """Clears everything tied to the current screenshot/order, ready for a new delivery.
+    API keys / provider choice are intentionally left untouched."""
+    for k, v in ORDER_FIELD_DEFAULTS.items():
+        st.session_state[k] = v.copy() if isinstance(v, list) else v
+    st.session_state.uploader_key_version += 1  # remounts file_uploader empty
+
 
 # JavaScript component listener to sync text input states
 query_params = st.query_params
@@ -67,6 +69,86 @@ def is_missing(value):
     if value is None:
         return True
     return value.strip().lower() in MISSING_TOKENS
+
+EXTRACTION_PROMPT = """
+Analyze the attached image(s) of a data table. If more than one image is provided,
+they all belong to the same single client order — combine information across all of
+them into one unified answer (e.g. one image may show the name/address while another
+shows the phone number).
+Return the output strictly in the following raw format (do not add markdown blocks, asterisks, or extra notes).
+If a field genuinely cannot be found in any image, return it as N/A.
+Mailing Address: [Extract value]
+Mailing Suburb: [Extract value]
+Mailing Post Code: [Extract value]
+Contact Name: [Extract value]
+Second Name: [Extract value]
+Client Mobile: [Extract value]
+Booking Owner: [Extract value]
+"""
+
+
+def extract_with_gemini(images, api_key):
+    client = genai.Client(api_key=api_key.strip())
+    response = client.models.generate_content(
+        model='gemini-2.5-flash',
+        contents=[EXTRACTION_PROMPT] + images
+    )
+    return response.text
+
+
+def extract_with_groq(images, api_key, model_name):
+    client = Groq(api_key=api_key.strip())
+    content = [{"type": "text", "text": EXTRACTION_PROMPT}]
+    for img in images:
+        buf = io.BytesIO()
+        rgb_img = img.convert("RGB")
+        rgb_img.save(buf, format="JPEG")
+        b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
+        })
+    completion = client.chat.completions.create(
+        model=model_name.strip(),
+        messages=[{"role": "user", "content": content}],
+    )
+    return completion.choices[0].message.content
+
+
+def run_extraction(images):
+    """Tries the chosen primary provider; if it errors out (e.g. rate-limited / high
+    traffic) and a key for the other provider is available, automatically falls back."""
+    primary = st.session_state.primary_provider
+    gemini_key = st.session_state.gemini_api_key.strip()
+    groq_key = st.session_state.groq_api_key.strip()
+
+    providers_to_try = []
+    if primary == "Gemini":
+        if gemini_key:
+            providers_to_try.append(("Gemini", lambda: extract_with_gemini(images, gemini_key)))
+        if groq_key:
+            providers_to_try.append(("Groq", lambda: extract_with_groq(images, groq_key, st.session_state.groq_model)))
+    else:
+        if groq_key:
+            providers_to_try.append(("Groq", lambda: extract_with_groq(images, groq_key, st.session_state.groq_model)))
+        if gemini_key:
+            providers_to_try.append(("Gemini", lambda: extract_with_gemini(images, gemini_key)))
+
+    if not providers_to_try:
+        raise RuntimeError("No API key configured for either provider.")
+
+    last_error = None
+    for name, call in providers_to_try:
+        try:
+            text = call()
+            if name != primary:
+                st.info(f"⚡ {primary} looked busy/unavailable — automatically switched to {name} for this batch.")
+            return text
+        except Exception as e:
+            last_error = e
+            continue
+    raise last_error
+
 
 # --- Custom Component Builders ---
 
@@ -226,102 +308,136 @@ def create_dan_murphys_link_button(label, url):
     """
     components.html(html_code, height=55)
 
-# --- Sidebar Input Section (Upload or Click-to-Paste Button) ---
+# ---------------------------------------------------------------------------
+# Sidebar: API config + image input.
+# Wrapped in @st.fragment so typing an API key, uploading a file, or pasting a
+# snip only reruns THIS block — not the whole page. The main area (all those
+# copy-input boxes below) stays untouched, which is what was causing the
+# "everything darkens / reloads" flash on every keystroke or upload before.
+# ---------------------------------------------------------------------------
+@st.fragment
+def sidebar_input_section():
+    st.sidebar.subheader("🔑 API Configuration")
+    provider = st.sidebar.selectbox(
+        "Primary AI Provider",
+        ["Gemini", "Groq"],
+        index=["Gemini", "Groq"].index(st.session_state.primary_provider),
+        help="This provider is tried first. If it errors out (e.g. rate-limited / high traffic), the app automatically falls back to the other one — as long as you've entered a key for it below."
+    )
+    st.session_state.primary_provider = provider
+
+    st.session_state.gemini_api_key = st.sidebar.text_input(
+        "Gemini API Key",
+        value=st.session_state.gemini_api_key,
+        type="password",
+        placeholder="Paste your Gemini key here...",
+        help="Used for image data extraction."
+    )
+    st.session_state.groq_api_key = st.sidebar.text_input(
+        "Groq API Key (fallback)",
+        value=st.session_state.groq_api_key,
+        type="password",
+        placeholder="Paste your Groq key here...",
+        help="Optional. Lets the app automatically switch providers if the other one is busy/rate-limited."
+    )
+    if st.session_state.groq_api_key.strip():
+        st.session_state.groq_model = st.sidebar.text_input(
+            "Groq Vision Model",
+            value=st.session_state.groq_model,
+            help="Groq's vision-capable model lineup changes fairly often — check console.groq.com/docs/vision if extraction stops working."
+        )
+
+    st.sidebar.write("---")
+    st.sidebar.subheader("📥 Input Screenshot(s)")
+    st.sidebar.caption("1️⃣ Enter your API key(s) above.  2️⃣ Paste or upload snip(s) below.  3️⃣ Press **Process** when ready.")
+
+    # Option 1: File Uploader (supports multiple files at once)
+    uploaded_files = st.sidebar.file_uploader(
+        "Upload Image File(s)",
+        type=["png", "jpg", "jpeg", "webp"],
+        accept_multiple_files=True,
+        key=f"uploader_{st.session_state.uploader_key_version}"
+    )
+
+    # Option 2: Direct "Paste Snip from Clipboard" Button
+    st.sidebar.markdown("<p style='font-size:14px; color:#E6E6E6; font-weight:500; margin-bottom:4px;'>Or Paste Directly from Clipboard</p>", unsafe_allow_html=True)
+
+    with st.sidebar:
+        paste_result = pbutton("📋 Add Snip from Clipboard")
+
+    # The component keeps returning the last-pasted image on every rerun, so we
+    # only add it to the batch if it's actually new (compared by content hash).
+    if paste_result.image_data is not None:
+        buf = io.BytesIO()
+        paste_result.image_data.save(buf, format="PNG")
+        img_hash = hashlib.md5(buf.getvalue()).hexdigest()
+        if img_hash != st.session_state.last_paste_hash:
+            st.session_state.pasted_batch.append({"image": paste_result.image_data, "hash": img_hash})
+            st.session_state.last_paste_hash = img_hash
+
+    if st.session_state.pasted_batch:
+        if st.sidebar.button("🗑️ Clear Pasted Snips"):
+            st.session_state.pasted_batch = []
+            st.session_state.last_paste_hash = None
+            st.rerun(scope="fragment")
+
+    # --- Gather every image (pasted batch + uploaded batch) into one list ---
+    images = [item["image"] for item in st.session_state.pasted_batch]
+    file_ids = [item["hash"] for item in st.session_state.pasted_batch]
+
+    if uploaded_files:
+        for f in uploaded_files:
+            images.append(Image.open(f))
+            file_ids.append(f.name + str(f.size))
+
+    st.session_state.staged_images = images
+    st.session_state.staged_file_id = "|".join(file_ids)
+
+    # Single-column preview stack (not a grid) so screenshots stay easy to
+    # read side-by-side with the extracted fields.
+    if images:
+        st.sidebar.write(f"**{len(images)} image(s) ready to process:**")
+        for img in images:
+            st.sidebar.image(img, use_container_width=True)
+
+
+sidebar_input_section()
+
+# ---------------------------------------------------------------------------
+# Process / Refresh controls live OUTSIDE the fragment on purpose: these are
+# the only actions that should trigger a full-page rerun (with the loading
+# spinner), exactly as requested.
+# ---------------------------------------------------------------------------
+images = st.session_state.staged_images
+file_id = st.session_state.staged_file_id
+
 st.sidebar.write("---")
-st.sidebar.subheader("📥 Input Screenshot(s)")
-st.sidebar.caption("1️⃣ Enter your Gemini API key above.  2️⃣ Paste or upload snip(s) below.  3️⃣ Press **Process** when ready.")
-
-# Option 1: File Uploader (supports multiple files at once)
-uploaded_files = st.sidebar.file_uploader(
-    "Upload Image File(s)",
-    type=["png", "jpg", "jpeg", "webp"],
-    accept_multiple_files=True
-)
-
-# Option 2: Direct "Paste Snip from Clipboard" Button (click once per snip to add it to the batch)
-st.sidebar.markdown("<p style='font-size:14px; color:#E6E6E6; font-weight:500; margin-bottom:4px;'>Or Paste Directly from Clipboard</p>", unsafe_allow_html=True)
-
-# Batch of pasted images lives in session_state so it survives reruns.
-if 'pasted_batch' not in st.session_state:
-    st.session_state.pasted_batch = []   # list of {"image": PIL.Image, "hash": str}
-if 'last_paste_hash' not in st.session_state:
-    st.session_state.last_paste_hash = None
-
-with st.sidebar:
-    paste_result = pbutton("📋 Add Snip from Clipboard")
-
-# The component keeps returning the last-pasted image on every rerun, so we
-# only add it to the batch if it's actually new (compared by content hash).
-if paste_result.image_data is not None:
-    buf = io.BytesIO()
-    paste_result.image_data.save(buf, format="PNG")
-    img_hash = hashlib.md5(buf.getvalue()).hexdigest()
-    if img_hash != st.session_state.last_paste_hash:
-        st.session_state.pasted_batch.append({"image": paste_result.image_data, "hash": img_hash})
-        st.session_state.last_paste_hash = img_hash
-
-if st.session_state.pasted_batch:
-    if st.sidebar.button("🗑️ Clear Pasted Snips"):
-        st.session_state.pasted_batch = []
-        st.session_state.last_paste_hash = None
-        st.rerun()
-
-# --- Gather every image (pasted batch + uploaded batch) into one list ---
-images = [item["image"] for item in st.session_state.pasted_batch]
-file_ids = [item["hash"] for item in st.session_state.pasted_batch]
-
-if uploaded_files:
-    for f in uploaded_files:
-        images.append(Image.open(f))
-        file_ids.append(f.name + str(f.size))
-
-file_id = "|".join(file_ids)
-
-if images:
-    st.sidebar.write(f"**{len(images)} image(s) ready to process:**")
-    preview_cols = st.sidebar.columns(min(len(images), 3))
-    for i, img in enumerate(images):
-        with preview_cols[i % len(preview_cols)]:
-            st.image(img, use_container_width=True)
-
-st.sidebar.write("---")
-process_clicked = st.sidebar.button(
+proc_col, refresh_col = st.sidebar.columns([2, 1])
+process_clicked = proc_col.button(
     "🔍 Process Images & Extract Data",
     type="primary",
     disabled=(len(images) == 0),
     use_container_width=True
 )
+refresh_clicked = refresh_col.button(
+    "🔄 Refresh",
+    help="Clears the current order (images + extracted fields) so you can start a new wine delivery. API keys are kept.",
+    use_container_width=True
+)
 
-# Processing only ever runs on the exact click of the button above —
-# entering your API key or adding another snip will never trigger it by itself.
+if refresh_clicked:
+    reset_order()
+    st.rerun()
+
 if process_clicked:
-    if not client:
-        st.error("Please enter your Gemini API Key in the sidebar first to process images.")
+    has_any_key = bool(st.session_state.gemini_api_key.strip() or st.session_state.groq_api_key.strip())
+    if not has_any_key:
+        st.error("Please enter at least one API key (Gemini or Groq) in the sidebar first.")
     else:
         with st.spinner("Extracting data and structuring layouts..."):
             try:
-                prompt = """
-                Analyze the attached image(s) of a data table. If more than one image is provided,
-                they all belong to the same single client order — combine information across all of
-                them into one unified answer (e.g. one image may show the name/address while another
-                shows the phone number).
-                Return the output strictly in the following raw format (do not add markdown blocks, asterisks, or extra notes).
-                If a field genuinely cannot be found in any image, return it as N/A.
-                Mailing Address: [Extract value]
-                Mailing Suburb: [Extract value]
-                Mailing Post Code: [Extract value]
-                Contact Name: [Extract value]
-                Second Name: [Extract value]
-                Client Mobile: [Extract value]
-                Booking Owner: [Extract value]
-                """
+                raw_text = run_extraction(images)
 
-                response = client.models.generate_content(
-                    model='gemini-2.5-flash',
-                    contents=[prompt] + images
-                )
-
-                raw_text = response.text
                 data = {}
                 for line in raw_text.split('\n'):
                     if ":" in line:
@@ -385,9 +501,9 @@ if process_clicked:
                 st.rerun()
 
             except Exception as e:
-                st.error(f"Processing failed: {e}")
+                st.error(f"Processing failed on all configured providers: {e}")
 elif not images:
-    st.info("👈 Enter your API Key, add snip(s) or upload image(s) in the sidebar, then press **'🔍 Process Images & Extract Data'** when you're ready.")
+    st.info("👈 Enter your API Key(s), add snip(s) or upload image(s) in the sidebar, then press **'🔍 Process Images & Extract Data'** when you're ready.")
 else:
     st.info(f"📎 {len(images)} image(s) staged. Click **'🔍 Process Images & Extract Data'** in the sidebar when you're ready.")
 
