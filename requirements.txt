@@ -1,4 +1,5 @@
 streamlit
-pillow
+Pillow
 google-genai
 streamlit-paste-button
+groq
