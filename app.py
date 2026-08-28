@@ -50,8 +50,17 @@ for _defaults in (ORDER_FIELD_DEFAULTS, CONFIG_FIELD_DEFAULTS):
 
 def reset_order():
     """Clears everything tied to the current screenshot/order, ready for a new delivery.
-    API keys / provider choice are intentionally left untouched."""
+    API keys / provider choice are intentionally left untouched.
+
+    NOTE: 'last_paste_hash' is deliberately NOT reset here. The paste-button
+    component keeps re-returning the same last-pasted image data on every
+    rerun, and we only skip re-adding it by comparing against last_paste_hash.
+    Resetting that to None would make the app think the old paste is "new"
+    again and silently re-add it right after a refresh.
+    """
     for k, v in ORDER_FIELD_DEFAULTS.items():
+        if k == 'last_paste_hash':
+            continue
         st.session_state[k] = v.copy() if isinstance(v, list) else v
     st.session_state.uploader_key_version += 1  # remounts file_uploader empty
 
@@ -377,8 +386,11 @@ def sidebar_input_section():
 
     if st.session_state.pasted_batch:
         if st.sidebar.button("🗑️ Clear Pasted Snips"):
+            # Only clear the batch — do NOT reset last_paste_hash. The paste
+            # component keeps re-returning the same image data on every
+            # rerun, and last_paste_hash is what stops that stale value from
+            # being silently re-added right after clearing.
             st.session_state.pasted_batch = []
-            st.session_state.last_paste_hash = None
             st.rerun(scope="fragment")
 
     # --- Gather every image (pasted batch + uploaded batch) into one list ---
@@ -400,112 +412,119 @@ def sidebar_input_section():
         for img in images:
             st.sidebar.image(img, use_container_width=True)
 
+    # -----------------------------------------------------------------
+    # Process / Refresh buttons live INSIDE the fragment on purpose.
+    # They need to see the just-computed `images` list on every render —
+    # if they lived outside the fragment, adding a paste/upload (which
+    # only reruns this fragment) would leave the buttons outside showing
+    # stale state (e.g. Process staying disabled until something forced
+    # a full-page rerun, which is the "need to hit Refresh first" bug).
+    # -----------------------------------------------------------------
+    st.sidebar.write("---")
+    proc_col, refresh_col = st.sidebar.columns([2, 1])
+    process_clicked = proc_col.button(
+        "🔍 Process Images & Extract Data",
+        type="primary",
+        disabled=(len(images) == 0),
+        use_container_width=True
+    )
+    refresh_clicked = refresh_col.button(
+        "🔄 Refresh",
+        help="Clears the current order (images + extracted fields) so you can start a new wine delivery. API keys are kept.",
+        use_container_width=True
+    )
+
+    if refresh_clicked:
+        reset_order()
+        st.rerun(scope="app")  # main-area fields also need to clear
+
+    if process_clicked:
+        has_any_key = bool(st.session_state.gemini_api_key.strip() or st.session_state.groq_api_key.strip())
+        if not has_any_key:
+            st.sidebar.error("Please enter at least one API key (Gemini or Groq) above first.")
+        else:
+            with st.spinner("Extracting data and structuring layouts..."):
+                try:
+                    raw_text = run_extraction(images)
+
+                    data = {}
+                    for line in raw_text.split('\n'):
+                        if ":" in line:
+                            key, val = line.split(":", 1)
+                            data[key.strip()] = val.strip()
+
+                    missing = []
+
+                    # Contact name
+                    contact_name_raw = data.get("Contact Name", "")
+                    if is_missing(contact_name_raw):
+                        missing.append("Full Name")
+                    else:
+                        st.session_state.full_name = contact_name_raw
+                        name_parts = st.session_state.full_name.split(" ", 1)
+                        st.session_state.first_name = name_parts[0] if len(name_parts) > 0 else st.session_state.first_name
+                        st.session_state.last_name = name_parts[1] if len(name_parts) > 1 else st.session_state.last_name
+
+                    # Partner / second name — genuinely optional, not treated as "missing"
+                    partner_raw = data.get("Second Name", "")
+                    st.session_state.partner_name = "" if is_missing(partner_raw) else partner_raw
+
+                    # Mobile number
+                    mobile_raw = data.get("Client Mobile", "")
+                    if is_missing(mobile_raw):
+                        missing.append("Recipient Mobile Number")
+                    else:
+                        st.session_state.contact_number = mobile_raw.replace(" ", "")
+
+                    # Booking owner
+                    booking_raw = data.get("Booking Owner", "")
+                    if is_missing(booking_raw):
+                        missing.append("Booking Owner")
+                    else:
+                        if "Entertainment Manager" not in booking_raw:
+                            st.session_state.booking_owner = f"{booking_raw} Entertainment Manager"
+                        else:
+                            st.session_state.booking_owner = booking_raw
+
+                    # Address
+                    address_raw = data.get("Mailing Address", "")
+                    suburb_raw = data.get("Mailing Suburb", "")
+                    postcode_raw = data.get("Mailing Post Code", "")
+                    if is_missing(address_raw) and is_missing(suburb_raw) and is_missing(postcode_raw):
+                        missing.append("Address")
+                    else:
+                        address_street = address_raw if not is_missing(address_raw) else "235 Joseph St"
+                        if address_street.endswith("St"):
+                            address_street = address_street[:-2] + "Street"
+                        elif address_street.endswith("St."):
+                            address_street = address_street[:-3] + "Street"
+
+                        suburb = (suburb_raw if not is_missing(suburb_raw) else "CANADIAN").upper()
+                        postcode = postcode_raw if not is_missing(postcode_raw) else "3350"
+
+                        st.session_state.formatted_address = f"{address_street}, {suburb} VIC {postcode}"
+
+                    st.session_state.missing_fields = missing
+                    st.session_state.last_processed_file = st.session_state.staged_file_id
+                    st.sidebar.success("✅ Data extracted — fields updated below.")
+                    st.rerun(scope="app")  # main-area copy fields need to update too
+
+                except Exception as e:
+                    st.sidebar.error(f"Processing failed on all configured providers: {e}")
+
+    if images:
+        st.sidebar.caption(f"📎 {len(images)} image(s) staged and ready.")
+
 
 sidebar_input_section()
 
 # ---------------------------------------------------------------------------
-# Process / Refresh controls live OUTSIDE the fragment on purpose: these are
-# the only actions that should trigger a full-page rerun (with the loading
-# spinner), exactly as requested.
+# Status banners in the main area. These reflect state set by the fragment
+# above and are accurate whenever the whole app has run (initial load,
+# Process click, or Refresh click).
 # ---------------------------------------------------------------------------
-images = st.session_state.staged_images
-file_id = st.session_state.staged_file_id
-
-st.sidebar.write("---")
-proc_col, refresh_col = st.sidebar.columns([2, 1])
-process_clicked = proc_col.button(
-    "🔍 Process Images & Extract Data",
-    type="primary",
-    disabled=(len(images) == 0),
-    use_container_width=True
-)
-refresh_clicked = refresh_col.button(
-    "🔄 Refresh",
-    help="Clears the current order (images + extracted fields) so you can start a new wine delivery. API keys are kept.",
-    use_container_width=True
-)
-
-if refresh_clicked:
-    reset_order()
-    st.rerun()
-
-if process_clicked:
-    has_any_key = bool(st.session_state.gemini_api_key.strip() or st.session_state.groq_api_key.strip())
-    if not has_any_key:
-        st.error("Please enter at least one API key (Gemini or Groq) in the sidebar first.")
-    else:
-        with st.spinner("Extracting data and structuring layouts..."):
-            try:
-                raw_text = run_extraction(images)
-
-                data = {}
-                for line in raw_text.split('\n'):
-                    if ":" in line:
-                        key, val = line.split(":", 1)
-                        data[key.strip()] = val.strip()
-
-                missing = []
-
-                # Contact name
-                contact_name_raw = data.get("Contact Name", "")
-                if is_missing(contact_name_raw):
-                    missing.append("Full Name")
-                else:
-                    st.session_state.full_name = contact_name_raw
-                    name_parts = st.session_state.full_name.split(" ", 1)
-                    st.session_state.first_name = name_parts[0] if len(name_parts) > 0 else st.session_state.first_name
-                    st.session_state.last_name = name_parts[1] if len(name_parts) > 1 else st.session_state.last_name
-
-                # Partner / second name — genuinely optional, not treated as "missing"
-                partner_raw = data.get("Second Name", "")
-                st.session_state.partner_name = "" if is_missing(partner_raw) else partner_raw
-
-                # Mobile number
-                mobile_raw = data.get("Client Mobile", "")
-                if is_missing(mobile_raw):
-                    missing.append("Recipient Mobile Number")
-                else:
-                    st.session_state.contact_number = mobile_raw.replace(" ", "")
-
-                # Booking owner
-                booking_raw = data.get("Booking Owner", "")
-                if is_missing(booking_raw):
-                    missing.append("Booking Owner")
-                else:
-                    if "Entertainment Manager" not in booking_raw:
-                        st.session_state.booking_owner = f"{booking_raw} Entertainment Manager"
-                    else:
-                        st.session_state.booking_owner = booking_raw
-
-                # Address
-                address_raw = data.get("Mailing Address", "")
-                suburb_raw = data.get("Mailing Suburb", "")
-                postcode_raw = data.get("Mailing Post Code", "")
-                if is_missing(address_raw) and is_missing(suburb_raw) and is_missing(postcode_raw):
-                    missing.append("Address")
-                else:
-                    address_street = address_raw if not is_missing(address_raw) else "235 Joseph St"
-                    if address_street.endswith("St"):
-                        address_street = address_street[:-2] + "Street"
-                    elif address_street.endswith("St."):
-                        address_street = address_street[:-3] + "Street"
-
-                    suburb = (suburb_raw if not is_missing(suburb_raw) else "CANADIAN").upper()
-                    postcode = postcode_raw if not is_missing(postcode_raw) else "3350"
-
-                    st.session_state.formatted_address = f"{address_street}, {suburb} VIC {postcode}"
-
-                st.session_state.missing_fields = missing
-                st.session_state.last_processed_file = file_id
-                st.success("✅ Data extracted — fields updated below.")
-                st.rerun()
-
-            except Exception as e:
-                st.error(f"Processing failed on all configured providers: {e}")
-elif not images:
+if not st.session_state.staged_images:
     st.info("👈 Enter your API Key(s), add snip(s) or upload image(s) in the sidebar, then press **'🔍 Process Images & Extract Data'** when you're ready.")
-else:
-    st.info(f"📎 {len(images)} image(s) staged. Click **'🔍 Process Images & Extract Data'** in the sidebar when you're ready.")
 
 if st.session_state.missing_fields:
     st.warning("⚠️ Couldn't find the following in the screenshot(s) — please fill them in manually: " + ", ".join(st.session_state.missing_fields))
