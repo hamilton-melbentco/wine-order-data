@@ -9,7 +9,7 @@ import base64
 import hashlib
 
 # 1. Page Configuration & UI Initialization
-st.set_page_config(page_title="🥂 Wine Order", layout="wide")
+st.set_page_config(page_title="🥂 Wine Order Extractor", layout="wide")
 st.title("🍾 Wine Order Image Data Extractor")
 st.write("Upload or paste one or more data table screenshots to extract details, modify fields live, and generate ready-to-copy templates.")
 
