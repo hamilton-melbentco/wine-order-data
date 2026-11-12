@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"></head>
+<body>
+<script>
+// Minimal Streamlit custom component (no build step, no npm).
+// Persists settings (API keys etc.) in THIS browser's localStorage only.
+// They never touch the project folder or the GitHub repo.
+const STORAGE_KEY = "wine_order_extractor_settings_v1";
+let loadedSent = false;
+
+function send(type, data) {
+  window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, data), "*");
+}
+
+function readSaved() {
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch (e) {
+    return {};
+  }
+}
+
+window.addEventListener("message", function (event) {
+  if (!event.data || event.data.type !== "streamlit:render") return;
+  const args = event.data.args || {};
+  send("streamlit:setFrameHeight", { height: 0 });
+
+  // First render of this page load: report what's saved so Python can fill the fields.
+  if (!loadedSent) {
+    loadedSent = true;
+    send("streamlit:setComponentValue", { value: { settings: readSaved() }, dataType: "json" });
+    return;
+  }
+
+  // Afterwards: write whatever Python tells us to (only once it has finished loading).
+  if (args.sync) {
+    try {
+      if (args.remember) {
+        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(args.settings || {}));
+      } else {
+        window.localStorage.removeItem(STORAGE_KEY);
+      }
+    } catch (e) { /* storage blocked (e.g. private mode) - fail quietly */ }
+  }
+});
+
+send("streamlit:componentReady", { apiVersion: 1 });
+send("streamlit:setFrameHeight", { height: 0 });
+</script>
+</body>
+</html>
