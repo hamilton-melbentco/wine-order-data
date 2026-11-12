@@ -7,6 +7,7 @@ from streamlit_paste_button import paste_image_button as pbutton
 import io
 import base64
 import hashlib
+import os
 
 # 1. Page Configuration & UI Initialization
 st.set_page_config(page_title="🥂 Wine Order Extractor", layout="wide")
@@ -40,12 +41,50 @@ CONFIG_FIELD_DEFAULTS = {
     'primary_provider': "Gemini",
     'groq_model': "qwen/qwen3.6-27b",
     'uploader_key_version': 0,   # bumped on refresh to force the file_uploader to reset
+    'remember_keys': True,       # persist settings in this browser's localStorage
+    'storage_loaded': False,     # True once saved browser settings have been read in
 }
 
 for _defaults in (ORDER_FIELD_DEFAULTS, CONFIG_FIELD_DEFAULTS):
     for k, v in _defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v.copy() if isinstance(v, list) else v
+
+
+# ---------------------------------------------------------------------------
+# Browser-side persistence (localStorage)
+# ---------------------------------------------------------------------------
+# A tiny custom component (browser_storage/index.html) reads/writes the user's
+# settings in THIS browser's localStorage. Keys never go into the project
+# folder, so they can't end up in the GitHub repo.
+_browser_storage = components.declare_component(
+    "browser_storage",
+    path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "browser_storage"),
+)
+
+PERSISTED_FIELDS = ['gemini_api_key', 'groq_api_key', 'primary_provider', 'groq_model']
+
+
+def browser_storage_sync():
+    """Loads saved settings once per page load, then keeps localStorage up to date.
+    Must be called AFTER the widgets that edit these values have rendered."""
+    settings = {k: st.session_state[k] for k in PERSISTED_FIELDS}
+    result = _browser_storage(
+        sync=st.session_state.storage_loaded,
+        remember=st.session_state.remember_keys,
+        settings=settings,
+        key="browser_storage",
+        default=None,
+    )
+    if not st.session_state.storage_loaded and result is not None:
+        saved = result.get("settings") or {}
+        for k in PERSISTED_FIELDS:
+            if saved.get(k):
+                st.session_state[k] = saved[k]
+        if saved:
+            st.session_state.remember_keys = True
+        st.session_state.storage_loaded = True
+        st.rerun(scope="app")  # re-render the sidebar inputs with the loaded values
 
 
 def reset_order():
@@ -349,6 +388,12 @@ def sidebar_input_section():
         placeholder="Paste your Groq key here...",
         help="Optional. Lets the app automatically switch providers if the other one is busy/rate-limited."
     )
+    st.session_state.remember_keys = st.sidebar.checkbox(
+        "💾 Remember keys in this browser",
+        value=st.session_state.remember_keys,
+        help="Saves your keys & provider choice in this browser's local storage so you don't have to paste them every time. "
+             "They are never written to the project folder or GitHub. Untick to erase them from this browser."
+    )
     if st.session_state.groq_api_key.strip():
         st.session_state.groq_model = st.sidebar.text_input(
             "Groq Vision Model",
@@ -514,6 +559,10 @@ def sidebar_input_section():
 
     if images:
         st.sidebar.caption(f"📎 {len(images)} image(s) staged and ready.")
+
+    # Invisible helper: loads saved keys on first run, then keeps them saved.
+    with st.sidebar:
+        browser_storage_sync()
 
 
 sidebar_input_section()
